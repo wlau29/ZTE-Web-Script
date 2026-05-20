@@ -154,7 +154,7 @@ function wait_for_log_in()
 
             show_logout_and_shutdown_buttons();
 
-            window.setInterval(get_status, 1000);
+            window.setInterval(get_status, 3000);
             window.setInterval(prevent_automatic_logout, 60000);
 
             window.clearInterval(wait_for_log_in_timer_id);
@@ -706,8 +706,6 @@ function get_status()
 
             // Render NG-style info sections
             renderNetworkInfo();
-            renderWanInfo();
-            renderDeviceInfo();
 
             // Update cell lock UI with current values
             update4gCellLockUi();
@@ -1255,8 +1253,11 @@ function update4gBandLockHeader(maskNum) {
         if ((maskNum & get4gBandMask(band)) !== 0n) activeBands.push(band);
     }
     var bandList = activeBands.length > 0 ? activeBands.join(", ") : "auto";
-    var header = document.getElementById("lte-band-lock-header");
-    if (header) header.textContent = "4G Band Lock: (" + bandList + ")";
+    var btnRow = document.getElementById("lte-band-lock-header");
+    if (btnRow) {
+        var header = btnRow.previousElementSibling;
+        if (header) header.textContent = "4G Band Lock: (" + bandList + ")";
+    }
 }
 
 function highlightBandButtons(headerId, activeBtnId) {
@@ -1321,29 +1322,28 @@ function highlight4gBandButton(maskHex) {
 
 function update5gBandLockHeader(activeBands) {
     var bandList = activeBands.length > 0 ? activeBands.join(", ") : "auto";
-    var header = document.getElementById("nr-band-lock-header");
-    if (header) header.textContent = "5G Band Lock: (" + bandList + ")";
+    var btnRow = document.getElementById("nr-band-lock-header");
+    if (btnRow) {
+        var header = btnRow.previousElementSibling;
+        if (header) header.textContent = "5G Band Lock: (" + bandList + ")";
+    }
 }
 
 function update5gCellLockUi() {
     var lockBtn = document.getElementById("btn-lock-5g-cell");
-    var title = document.getElementById("title-5g-celllock");
-    if (!lockBtn || !title) return;
+    if (!lockBtn) return;
     var mc5g_pci = nr5g_pci || Z5g_PCI || "0";
     lockBtn.dataset.pci = parsePci(mc5g_pci) || "<PCI>";
     lockBtn.dataset.earfcn = nr5g_action_channel || Z5g_dlEarfcn || "<EARFCN>";
     lockBtn.dataset.band = (nr5g_action_band || (Z5g_CELLINFO_band ? Z5g_CELLINFO_band.replace("n","").trim() : "") || "") || "<BAND>";
-    title.textContent = "5G Cell Lock";
 }
 
 function update4gCellLockUi() {
     var lockBtn = document.getElementById("btn-lock-4g-cell");
-    var title = document.getElementById("title-4g-celllock");
-    if (!lockBtn || !title) return;
+    if (!lockBtn) return;
     var mc4g_pci = lte_pci || Z_PCI || "0";
     lockBtn.dataset.pci = parsePci(mc4g_pci) || "<PCI>";
     lockBtn.dataset.earfcn = wan_active_channel || Z_dl_earfcn || "<EARFCN>";
-    title.textContent = "4G Cell Lock";
 }
 
 function initButtonBlurHandler() {
@@ -1353,8 +1353,6 @@ function initButtonBlurHandler() {
         if (e.target && e.target.tagName === "BUTTON") e.target.blur();
     });
 }
-
-/* ---- NG-style info rendering ---- */
 
 function renderNetworkInfo() {
     var table = document.getElementById("router-info-table");
@@ -1373,6 +1371,18 @@ function renderNetworkInfo() {
     var lteCellId = cell_id || "-";
     var nrCellId = (nr5g_cell_id || Z5g_CELL_ID) || "-";
 
+    // Device info
+    var temps = "";
+    if (pm_sensor_ambient && pm_sensor_ambient > -40) temps += (temps ? "&nbsp;/&nbsp;" : "") + pm_sensor_ambient + "°C";
+    if (pm_sensor_mdm && pm_sensor_mdm > -40) temps += (temps ? "&nbsp;/&nbsp;" : "") + pm_sensor_mdm + "°C";
+    if (pm_sensor_5g && pm_sensor_5g > -40) temps += (temps ? "&nbsp;/&nbsp;" : "") + pm_sensor_5g + "°C";
+    if (pm_sensor_pa1 && pm_sensor_pa1 > -40) temps += (temps ? "&nbsp;/&nbsp;" : "") + pm_sensor_pa1 + "°C";
+    if (wifi_chip_temp && wifi_chip_temp > -40) temps += (temps ? "&nbsp;/&nbsp;" : "") + wifi_chip_temp + "°C";
+
+    var txPower = "";
+    if (tx_power != "" && is_lte && !is_5g_nsa) txPower = tx_power + " dBm";
+    if (!txPower && tx_power != "" && is_5g_nsa) txPower = tx_power + " dBm";
+
     table.innerHTML =
         '<tr>' +
         '<th class="param-col"></th>' +
@@ -1389,7 +1399,9 @@ function renderNetworkInfo() {
         '<tr><td class="param-col">PCI</td><td>' + (nr.pci || "-") + '</td><td>' + (lte.pci || "-") + '</td></tr>' +
         '<tr><td class="param-col">ARFCN</td><td>' + (nr.arfcn || "-") + '</td><td>' + (lte.earfcn || "-") + '</td></tr>' +
         '<tr><td class="param-col">RSSI</td><td>' + (nr.rssi != null && nr.rssi !== "" ? nr.rssi + " dBm" : "-") + '</td><td>' + (lte.rssi != null && lte.rssi !== "" ? lte.rssi + " dBm" : "-") + '</td></tr>' +
-        '<tr><td class="param-col">Cell ID</td><td>' + nrCellId + '</td><td>' + lteCellId + '</td></tr>';
+        '<tr><td class="param-col">Cell ID</td><td>' + nrCellId + '</td><td>' + lteCellId + '</td></tr>' +
+        '<tr><td class="param-col">IPv4</td><td colspan="2">' + (wan_ipaddr || "-") + '</td></tr>' +
+        '<tr><td class="param-col">Model</td><td colspan="2">' + (dev_model || "-") + '</td></tr>';
 }
 
 function gatherNrSignalData(nrCells) {
@@ -1439,66 +1451,6 @@ function gatherLteSignalData(lteCells) {
     }
     return d;
 }
-
-function renderWanInfo() {
-    var table = document.getElementById("wan-info-table");
-    if (!table) return;
-    var rows = "";
-    if (wan_ipaddr) {
-        rows += '<tr><th>IPv4 Address</th><td>' + wan_ipaddr + '</td></tr>';
-    } else {
-        rows += '<tr><th>IPv4 Address</th><td>-</td></tr>';
-    }
-    table.innerHTML = rows;
-}
-
-function renderDeviceInfo() {
-    var table = document.getElementById("system-info-table");
-    if (!table) return;
-    var rows = "";
-
-    if (dev_model) rows += '<tr><th>Model</th><td>' + dev_model + '</td></tr>';
-    if (dev_hardware_version) rows += '<tr><th>Hardware</th><td>' + dev_hardware_version + '</td></tr>';
-    if (dev_web_version) rows += '<tr><th>Firmware</th><td>' + dev_web_version + '</td></tr>';
-
-    var temps = "";
-    if (pm_sensor_ambient && pm_sensor_ambient > -40) temps += (temps ? "&nbsp;&nbsp;" : "") + "A:&nbsp;" + pm_sensor_ambient + "°C";
-    if (pm_sensor_mdm && pm_sensor_mdm > -40) temps += (temps ? "&nbsp;&nbsp;" : "") + "M:&nbsp;" + pm_sensor_mdm + "°C";
-    if (pm_sensor_5g && pm_sensor_5g > -40) temps += (temps ? "&nbsp;&nbsp;" : "") + "5G:&nbsp;" + pm_sensor_5g + "°C";
-    if (pm_sensor_pa1 && pm_sensor_pa1 > -40) temps += (temps ? "&nbsp;&nbsp;" : "") + "P:&nbsp;" + pm_sensor_pa1 + "°C";
-    if (wifi_chip_temp && wifi_chip_temp > -40) temps += (temps ? "&nbsp;&nbsp;" : "") + "W:&nbsp;" + wifi_chip_temp + "°C";
-    if (temps) rows += '<tr><th>Temp</th><td>' + temps + '</td></tr>';
-
-    if (tx_power != "" && is_lte && !is_5g_nsa) {
-        rows += '<tr><th>TX Power</th><td>' + tx_power + ' dBm</td></tr>';
-    }
-
-    table.innerHTML = rows;
-}
-
-function setupInfoCheckboxes() {
-    var netChk = document.getElementById("chk-network-info");
-    var wanChk = document.getElementById("chk-wan-info");
-    var devChk = document.getElementById("chk-device-info");
-
-    var netSection = document.getElementById("network-info-section");
-    var wanSection = document.getElementById("wan-info-section");
-    var devSection = document.getElementById("device-info-section");
-
-    netChk.checked = localStorage.getItem("ScriptCheckBoxNetworkInfo") !== "false";
-    wanChk.checked = localStorage.getItem("ScriptCheckBoxWanInfo") === "true";
-    devChk.checked = localStorage.getItem("ScriptCheckBoxDeviceInfo") === "true";
-
-    netSection.style.display = netChk.checked ? "block" : "none";
-    wanSection.style.display = wanChk.checked ? "block" : "none";
-    devSection.style.display = devChk.checked ? "block" : "none";
-
-    netChk.addEventListener("change", function() { localStorage.setItem("ScriptCheckBoxNetworkInfo", netChk.checked); netSection.style.display = netChk.checked ? "block" : "none"; });
-    wanChk.addEventListener("change", function() { localStorage.setItem("ScriptCheckBoxWanInfo", wanChk.checked); wanSection.style.display = wanChk.checked ? "block" : "none"; });
-    devChk.addEventListener("change", function() { localStorage.setItem("ScriptCheckBoxDeviceInfo", devChk.checked); devSection.style.display = devChk.checked ? "block" : "none"; });
-}
-
-/* ---- NG-style Panel Injection ---- */
 
 function inject_html() {
     $(".headcontainer").hide();
@@ -1575,27 +1527,9 @@ function inject_html() {
         </div>
       </div>
 
-      <div class="section" id="info-checkboxes">
-        <div class="checkbox-group">
-          <label><input type="checkbox" id="chk-network-info"> Show Network &amp; Signal Info</label>
-          <label><input type="checkbox" id="chk-wan-info"> Show WAN Info</label>
-          <label><input type="checkbox" id="chk-device-info"> Show Device Info</label>
-        </div>
-      </div>
-
       <div class="info-section" id="network-info-section">
         <div class="section-title">Network Info</div>
         <table id="router-info-table" class="info-table-3col"></table>
-      </div>
-
-      <div class="info-section" id="wan-info-section">
-        <div class="section-title">WAN Info</div>
-        <table id="wan-info-table" class="info-table"></table>
-      </div>
-
-      <div class="info-section" id="device-info-section">
-        <div class="section-title">Device Info</div>
-        <table id="system-info-table" class="info-table"></table>
       </div>
 
       <div class="section" id="more-section">
@@ -1653,9 +1587,6 @@ function inject_html() {
       .info-table-3col td { text-align:center; }
       .info-table-3col .param-col { text-align:left;color:#444;width:25%; }
       .info-table-3col .header-col { font-weight:bold;font-size:12px;color:#333;text-align:center; }
-      #info-checkboxes { margin-top:6px;display:flex;justify-content:center; }
-      #info-checkboxes .checkbox-group { display:grid;grid-template-columns:repeat(3,minmax(150px,1fr));justify-items:start;align-items:center;gap:4px 20px;width:max-content;font-size:12px; }
-      #info-checkboxes label { display:flex;align-items:center;gap:4px;margin:0;white-space:nowrap; }
       #more-section .option-section { background:#fafafa;border:1px solid #ddd;border-radius:4px;padding:8px;margin:8px auto;max-width:960px;box-shadow:0 1px 2px rgba(0,0,0,0.05); }
       #more-section .section-title { font-weight:bold;font-size:12px;margin-bottom:6px;color:#333;text-align:center;border:none; }
       #more-section .button-row { display:flex;flex-wrap:wrap;gap:6px;justify-content:center; }
@@ -1790,9 +1721,6 @@ function inject_html() {
 
     // Button blur handler
     initButtonBlurHandler();
-
-    // Info checkboxes
-    setupInfoCheckboxes();
 }
 
 prepare_1_timer_id = window.setInterval(prepare_1, 250);
