@@ -37,14 +37,17 @@ siginfo =
     "lte_rsrp_1,lte_rsrp_2,lte_rsrp_3,lte_rsrp_4," +
     "lte_snr_1,lte_snr_2,lte_snr_3,lte_snr_4," +
     "lte_pci,lte_pci_lock,lte_earfcn_lock," +
+    "sinr,rssi,Z_PCI,Z_dl_earfcn,lte_ca_pcell_arfcn," +
 
     "5g_rx0_rsrp,5g_rx1_rsrp,Z5g_rsrp,Z5g_rsrq,Z5g_SINR," +
+    "Z5g_CELLINFO_band,Z5g_PCI,Z5g_dlEarfcn,Z5g_CELL_ID," +
     "nr5g_cell_id,nr5g_pci," +
     "nr5g_action_channel,nr5g_action_band," +
     "nr5g_action_nsa_band," +
     "nr_ca_pcell_band,nr_ca_pcell_freq," +
     "nr_multi_ca_scell_info," +
     "nr5g_sa_band_lock,nr5g_nsa_band_lock," +
+    "lte_band_lock," +
 
     "pm_sensor_ambient,pm_sensor_mdm,pm_sensor_5g,pm_sensor_pa1,wifi_chip_temp";
 
@@ -433,6 +436,14 @@ class LteCaCellInfo
     }
 }
 
+function parsePci(val) {
+    // MC8020 Z_PCI/Z5g_PCI come as decimal; original lte_pci/nr5g_pci come as hex.
+    // If the string contains any lowercase hex letters (a-f), treat as hex.
+    // Otherwise treat as decimal.
+    if (/[a-fA-F]/.test(val)) return parseInt(val, 16);
+    return Number(val);
+}
+
 function parse_lte_cell_info()
 {
     if (!is_lte)
@@ -440,13 +451,20 @@ function parse_lte_cell_info()
 
     var lte_cells = [];
 
+    // MC8020 compatibility: fallback when lte_rsrp_1 etc. are empty
+    if (!lte_rsrp_1 && lte_rsrp) lte_rsrp_1 = lte_rsrp;
+    if (!lte_snr_1 && sinr) lte_snr_1 = sinr;
+    if (!lte_rssi && rssi) lte_rssi = rssi;
+    if (!lte_pci && Z_PCI) lte_pci = Z_PCI;
+    if (!lte_ca_pcell_freq && lte_ca_pcell_arfcn) lte_ca_pcell_freq = lte_ca_pcell_arfcn;
+
     var lte_main_band =
         (lte_ca_pcell_band != "" ? lte_ca_pcell_band : lte_band);
 
     if (lte_main_band == "")
         lte_main_band = "??";
 
-    var pci = lte_pci ? parseInt(lte_pci, 16) : "N/A";
+    var pci = lte_pci ? parsePci(lte_pci) : "N/A";
     lte_cells.push(new LteCaCellInfo(
         pci,
         "B" + lte_main_band,
@@ -529,12 +547,19 @@ function parse_nr_cell_info()
         return [];
     }
 
+    // MC8020 compatibility: fallback to Z5g_* fields when nr5g_* are empty
+    var mc_pci = nr5g_pci || Z5g_PCI || "0";
+    var mc_channel = nr5g_action_channel || Z5g_dlEarfcn || "";
+    var mc_band = nr5g_action_band || (Z5g_CELLINFO_band ? Z5g_CELLINFO_band.replace("n","").trim() : "") || "";
+    var mc_nsa_band = nr5g_action_nsa_band || mc_band || "";
+    var mc_cell_id = nr5g_cell_id || Z5g_CELL_ID || "";
+
     /*
      * There's apparently no better fix for this.
      * The API does not reset its memory correctly after switching from
      * 5G CA to 5G without CA.
      */
-    var is_ca = nr_ca_pcell_freq == "" || nr5g_action_channel == nr_ca_pcell_freq;
+    var is_ca = nr_ca_pcell_freq == "" || mc_channel == nr_ca_pcell_freq;
 
     if (_5g_rx0_rsrp == "")
         _5g_rx0_rsrp = Z5g_rsrp;
@@ -546,15 +571,15 @@ function parse_nr_cell_info()
 
     if (!is_ca) {
         var nr_band =
-            (is_5g_nsa ? "n" + nr5g_action_nsa_band : nr5g_action_band);
+            (is_5g_nsa ? "n" + mc_nsa_band : "n" + mc_band);
 
-        if (nr_band == "n" || nr_band == "n-1")
+        if (nr_band == "n" || nr_band == "n-1" || nr_band == "n")
             nr_band = "n??";
 
         nr_cells.push(new NrCaCellInfo(
-            parseInt(nr5g_pci, 16),
+            parsePci(mc_pci) || 0,
             nr_band,
-            nr5g_action_channel,
+            mc_channel,
             is_5g_nsa ? "" : bandwidth.replace("MHz", ""),
             _5g_rx0_rsrp,
             _5g_rx1_rsrp,
@@ -568,20 +593,18 @@ function parse_nr_cell_info()
 
     var pcc_band = nr_ca_pcell_band != ""
     ? nr_ca_pcell_band
-    : (nr5g_action_band != ""
-        ? (nr5g_action_band[0] == 'n' || nr5g_action_band[0] == 'N'
-            ? nr5g_action_band.substr(1)
-            : nr5g_action_band)
+    : (mc_band != ""
+        ? mc_band
         : "??");
 
     var pcc_freq = nr_ca_pcell_freq != ""
         ? nr_ca_pcell_freq
-        : (nr5g_action_channel != ""
-            ? nr5g_action_channel
+        : (mc_channel != ""
+            ? mc_channel
             : "??");
 
     nr_cells.push(new NrCaCellInfo(
-        parseInt(nr5g_pci, 16),
+        parsePci(mc_pci) || 0,
         "n" + pcc_band,
         pcc_freq,
         bandwidth == "" ? "" : bandwidth.replace("MHz", ""),
@@ -683,13 +706,15 @@ function get_status()
 
             // Render NG-style info sections
             renderNetworkInfo();
-            renderSignalInfo();
             renderWanInfo();
             renderDeviceInfo();
 
             // Update cell lock UI with current values
             update4gCellLockUi();
             update5gCellLockUi();
+
+            // Highlight current 4G band lock button
+            highlight4gBandButton(lte_band_lock);
 
             // Highlight current bearer mode
             var netSelect = network_type;
@@ -777,7 +802,7 @@ function lte_cell_lock(reset = false, prefilled) {
     if (reset) {
         lockParameters = ["0", "0"];
     } else {
-        var defaultPciEarfcn = prefilled || (parseInt(lte_pci, 16) + "," + wan_active_channel);
+        var defaultPciEarfcn = prefilled || (parsePci(lte_pci || Z_PCI || "0") + "," + wan_active_channel);
         var cellLockDetails = prompt("Please input PCI,EARFCN, separated by ',' char (example 116,3350). "+
                                      "Leave default for lock on current main band.", defaultPciEarfcn);
 
@@ -1234,6 +1259,66 @@ function update4gBandLockHeader(maskNum) {
     if (header) header.textContent = "4G Band Lock: (" + bandList + ")";
 }
 
+function highlightBandButtons(headerId, activeBtnId) {
+    var header = document.getElementById(headerId);
+    if (!header) return;
+    // header itself may be the button row, or the button row is a child/sibling
+    var row = header.querySelector("button") ? header : header.querySelector(".button-row");
+    if (!row) {
+        var container = header.parentElement;
+        row = container ? container.querySelector(".button-row") : null;
+    }
+    if (!row) return;
+    row.querySelectorAll("button").forEach(function(btn) {
+        btn.style.background = "";
+        btn.style.color = "";
+        btn.style.fontWeight = "normal";
+    });
+    if (activeBtnId) {
+        var active = document.getElementById(activeBtnId);
+        if (active) {
+            active.style.background = "#4CAF50";
+            active.style.color = "white";
+            active.style.fontWeight = "bold";
+        }
+    }
+}
+
+function highlight4gBandButton(maskHex) {
+    if (!maskHex || maskHex == "" || maskHex == "0" || maskHex == "0x0") {
+        highlightBandButtons("lte-band-lock-header", null);
+        return;
+    }
+    var maskStr = String(maskHex).replace(/^0x/i, '').toUpperCase();
+    if (maskStr.length == 0 || maskStr == "?") return;
+    try { var mask = BigInt("0x" + maskStr); } catch(e) { return; }
+
+    // Known presets: band list -> button id
+    var presets = [
+        { bands: [1], id: "lte-band-b1" },
+        { bands: [3], id: "lte-band-b3" },
+        { bands: [7], id: "lte-band-b7" },
+        { bands: [8], id: "lte-band-b8" },
+        { bands: [20], id: "lte-band-b20" },
+        { bands: [28], id: "lte-band-b28" },
+        { bands: [1, 3], id: "lte-band-b1b3" },
+        { bands: [1, 3, 7], id: "lte-band-b1b3b7" },
+    ];
+    for (var i = 0; i < presets.length; i++) {
+        var expected = presets[i].bands.reduce(function(m, b) { return m | get4gBandMask(b); }, 0n);
+        if (mask === expected) {
+            highlightBandButtons("lte-band-lock-header", presets[i].id);
+            return;
+        }
+    }
+    // Check for "all bands" (0xA3E2AB0908DF)
+    if (mask === BigInt("0xA3E2AB0908DF")) {
+        highlightBandButtons("lte-band-lock-header", "lte-band-auto");
+        return;
+    }
+    // No match — custom/manual combination, don't highlight any preset button
+}
+
 function update5gBandLockHeader(activeBands) {
     var bandList = activeBands.length > 0 ? activeBands.join(", ") : "auto";
     var header = document.getElementById("nr-band-lock-header");
@@ -1244,9 +1329,10 @@ function update5gCellLockUi() {
     var lockBtn = document.getElementById("btn-lock-5g-cell");
     var title = document.getElementById("title-5g-celllock");
     if (!lockBtn || !title) return;
-    lockBtn.dataset.pci = parseInt(nr5g_pci, 16) || "<PCI>";
-    lockBtn.dataset.earfcn = nr5g_action_channel || "<EARFCN>";
-    lockBtn.dataset.band = nr5g_action_band ? nr5g_action_band.replace("n","") : "<BAND>";
+    var mc5g_pci = nr5g_pci || Z5g_PCI || "0";
+    lockBtn.dataset.pci = parsePci(mc5g_pci) || "<PCI>";
+    lockBtn.dataset.earfcn = nr5g_action_channel || Z5g_dlEarfcn || "<EARFCN>";
+    lockBtn.dataset.band = (nr5g_action_band || (Z5g_CELLINFO_band ? Z5g_CELLINFO_band.replace("n","").trim() : "") || "") || "<BAND>";
     title.textContent = "5G Cell Lock";
 }
 
@@ -1254,8 +1340,9 @@ function update4gCellLockUi() {
     var lockBtn = document.getElementById("btn-lock-4g-cell");
     var title = document.getElementById("title-4g-celllock");
     if (!lockBtn || !title) return;
-    lockBtn.dataset.pci = parseInt(lte_pci, 16) || "<PCI>";
-    lockBtn.dataset.earfcn = wan_active_channel || "<EARFCN>";
+    var mc4g_pci = lte_pci || Z_PCI || "0";
+    lockBtn.dataset.pci = parsePci(mc4g_pci) || "<PCI>";
+    lockBtn.dataset.earfcn = wan_active_channel || Z_dl_earfcn || "<EARFCN>";
     title.textContent = "4G Cell Lock";
 }
 
@@ -1272,103 +1359,85 @@ function initButtonBlurHandler() {
 function renderNetworkInfo() {
     var table = document.getElementById("router-info-table");
     if (!table) return;
-    var bandSummary = "-";
-    var totalBandwidth = 0;
     var lteCells = parse_lte_cell_info();
     var nrCells = parse_nr_cell_info();
-
-    var parts = [];
-    nrCells.forEach(function(c) { if (c.band) parts.push("N" + c.band.replace("n","")); });
-    lteCells.forEach(function(c) { if (c.band) parts.push(c.band); });
-    if (parts.length > 0) bandSummary = parts.join(" + ");
-
-    lteCells.forEach(function(c) { var bw = parseInt(c.bandwidth, 10); if (!isNaN(bw)) totalBandwidth += bw; });
-    nrCells.forEach(function(c) { var bw = parseInt(c.bandwidth, 10); if (!isNaN(bw)) totalBandwidth += bw; });
 
     var connType = network_type || "-";
     if (connType === "SA") connType = "5G SA";
     else if (connType === "ENDC") connType = "5G NSA";
 
-    var cellIdDisplay = "-";
-    var nodeId = null, sectorId = null;
-    if (is_lte && cell_id) {
-        nodeId = Number(cell_id) >>> 8;
-        sectorId = Number(cell_id) & 0xFF;
-    } else if (nr5g_cell_id) {
-        nodeId = Number(nr5g_cell_id) >>> 8;
-        sectorId = Number(nr5g_cell_id) & 0xFF;
-    }
-    if (nodeId != null && sectorId != null) {
-        cellIdDisplay = nodeId + '<span class="cellid-sep">|</span>' + sectorId;
-    }
+    // Gather NR data (for EN-DC/LTE-NSA when parse_nr_cell_info returns empty, use Z5g* directly)
+    var nr = gatherNrSignalData(nrCells);
+    var lte = gatherLteSignalData(lteCells);
+
+    var lteCellId = cell_id || "-";
+    var nrCellId = (nr5g_cell_id || Z5g_CELL_ID) || "-";
 
     table.innerHTML =
-        '<tr><th>Provider</th><td>' + (network_provider_fullname || "-") + '</td></tr>' +
-        '<tr><th>Connection</th><td>' + connType + '</td></tr>' +
-        '<tr><th>Bands</th><td>' + bandSummary + '</td></tr>' +
-        '<tr><th>BW</th><td>' + (totalBandwidth > 0 ? totalBandwidth + " MHz" : "-") + '</td></tr>' +
-        '<tr><th>Cell ID</th><td>' + cellIdDisplay + '</td></tr>';
+        '<tr>' +
+        '<th class="param-col"></th>' +
+        '<th class="header-col">5G NR</th>' +
+        '<th class="header-col">LTE</th>' +
+        '</tr>' +
+        '<tr><td class="param-col">Provider</td><td colspan="2">' + (network_provider_fullname || "-") + '</td></tr>' +
+        '<tr><td class="param-col">Connection</td><td colspan="2">' + connType + '</td></tr>' +
+        '<tr><td class="param-col">Bands</td><td>' + (nr.band || "-") + '</td><td>' + (lte.band || "-") + '</td></tr>' +
+        '<tr><td class="param-col">BW</td><td>' + (nr.bandwidth ? nr.bandwidth + " MHz" : "-") + '</td><td>' + (lte.bandwidth ? lte.bandwidth + " MHz" : "-") + '</td></tr>' +
+        '<tr><td class="param-col">RSRP</td><td>' + (nr.rsrp1 != null && nr.rsrp1 !== "" ? nr.rsrp1 + " dBm" : "-") + '</td><td>' + (lte.rsrp1 != null && lte.rsrp1 !== "" ? lte.rsrp1 + " dBm" : "-") + '</td></tr>' +
+        '<tr><td class="param-col">RSRQ</td><td>' + (nr.rsrq != null && nr.rsrq !== "" ? nr.rsrq + " dBm" : "-") + '</td><td>' + (lte.rsrq != null && lte.rsrq !== "" ? lte.rsrq + " dBm" : "-") + '</td></tr>' +
+        '<tr><td class="param-col">SINR</td><td>' + (nr.sinr != null && nr.sinr !== "" ? nr.sinr + " dB" : "-") + '</td><td>' + (lte.sinr != null && lte.sinr !== "" ? lte.sinr + " dB" : "-") + '</td></tr>' +
+        '<tr><td class="param-col">PCI</td><td>' + (nr.pci || "-") + '</td><td>' + (lte.pci || "-") + '</td></tr>' +
+        '<tr><td class="param-col">ARFCN</td><td>' + (nr.arfcn || "-") + '</td><td>' + (lte.earfcn || "-") + '</td></tr>' +
+        '<tr><td class="param-col">RSSI</td><td>' + (nr.rssi != null && nr.rssi !== "" ? nr.rssi + " dBm" : "-") + '</td><td>' + (lte.rssi != null && lte.rssi !== "" ? lte.rssi + " dBm" : "-") + '</td></tr>' +
+        '<tr><td class="param-col">Cell ID</td><td>' + nrCellId + '</td><td>' + lteCellId + '</td></tr>';
 }
 
-function renderSignalInfo() {
-    var container = document.getElementById("signal-info-container");
-    if (!container) return;
-    container.innerHTML = "";
-
-    function tf(val) { return val ? "✓" : "✗"; }
-
-    // NR signals
-    if (is5gBasedType(network_type)) {
-        var nrCells = parse_nr_cell_info();
-        if (nrCells.length > 0) {
-            var grid = document.createElement("div");
-            grid.className = "signal-grid";
-            nrCells.forEach(function(cell, idx) {
-                var box = document.createElement("div");
-                box.className = "signal-cell";
-                var bandTitle = cell.band ? cell.band : "NR Cell " + (idx + 1);
-                box.innerHTML =
-                    '<div class="cell-title">' + bandTitle + '</div>' +
-                    '<table>' +
-                    '<tr><th>RSRP</th><td>' + (cell.rsrp1 ?? "-") + '</td></tr>' +
-                    '<tr><th>RSRQ</th><td>' + (cell.rsrq ?? "-") + '</td></tr>' +
-                    '<tr><th>SINR</th><td>' + (cell.sinr ?? "-") + '</td></tr>' +
-                    '<tr><th>PCI</th><td>' + (cell.pci ?? "-") + '</td></tr>' +
-                    '<tr><th>BW</th><td>' + (cell.bandwidth ? cell.bandwidth + " MHz" : "-") + '</td></tr>' +
-                    '<tr><th>ARFCN</th><td>' + (cell.arfcn ?? "-") + '</td></tr>' +
-                    '</table>';
-                grid.appendChild(box);
-            });
-            container.appendChild(grid);
+function gatherNrSignalData(nrCells) {
+    var d = {};
+    if (nrCells && nrCells.length > 0) {
+        var c = nrCells[0];
+        d.band = c.band || "-";
+        d.bandwidth = c.bandwidth;
+        d.rsrp1 = c.rsrp1;
+        d.rsrq = c.rsrq;
+        d.sinr = c.sinr;
+        d.pci = (typeof c.pci === "number" && !isNaN(c.pci)) ? c.pci : "-";
+        d.arfcn = c.arfcn;
+        d.rssi = "-";
+    } else if (is_5g_nsa) {
+        // LTE-NSA or inactive NR: use Z5g* fields directly
+        var nrPci = Z5g_PCI || nr5g_pci;
+        var nrPciDisplay = "-";
+        if (nrPci) {
+            try { nrPciDisplay = parsePci(nrPci) || "-"; } catch(e) {}
         }
+        var nrBand = nr5g_action_band || (Z5g_CELLINFO_band ? Z5g_CELLINFO_band.replace("n","").trim() : "") || "-";
+        d.band = nrBand != "-" ? "n" + nrBand : "-";
+        d.bandwidth = "";
+        d.rsrp1 = _5g_rx0_rsrp || Z5g_rsrp || "-";
+        d.rsrq = Z5g_rsrq;
+        d.sinr = (Z5g_SINR && Z5g_SINR != "-20.0" && Z5g_SINR != "-3276.8" ? Z5g_SINR : "-");
+        d.pci = nrPciDisplay;
+        d.arfcn = Z5g_dlEarfcn || nr5g_action_channel;
+        d.rssi = "-";
     }
+    return d;
+}
 
-    // LTE signals
-    if (is_lte) {
-        var lteCells = parse_lte_cell_info();
-        if (lteCells.length > 0) {
-            var grid = document.createElement("div");
-            grid.className = "signal-grid";
-            lteCells.forEach(function(cell, idx) {
-                var box = document.createElement("div");
-                box.className = "signal-cell";
-                var bandTitle = cell.band || "Cell " + (idx + 1);
-                box.innerHTML =
-                    '<div class="cell-title">' + bandTitle + '</div>' +
-                    '<table>' +
-                    '<tr><th>RSRP</th><td>' + (cell.rsrp1 ?? "-") + '</td></tr>' +
-                    '<tr><th>RSRQ</th><td>' + (cell.rsrq ?? "-") + '</td></tr>' +
-                    '<tr><th>SINR</th><td>' + (cell.sinr1 ?? "-") + '</td></tr>' +
-                    '<tr><th>RSSI</th><td>' + (cell.rssi ?? "-") + '</td></tr>' +
-                    '<tr><th>PCI</th><td>' + (cell.pci ?? "-") + '</td></tr>' +
-                    '<tr><th>BW</th><td>' + (cell.bandwidth ? cell.bandwidth + " MHz" : "-") + '</td></tr>' +
-                    '<tr><th>EARFCN</th><td>' + (cell.earfcn ?? "-") + '</td></tr>' +
-                    '</table>';
-                grid.appendChild(box);
-            });
-            container.appendChild(grid);
-        }
+function gatherLteSignalData(lteCells) {
+    var d = {};
+    if (lteCells && lteCells.length > 0) {
+        var c = lteCells[0];
+        d.band = c.band || "-";
+        d.bandwidth = c.bandwidth;
+        d.rsrp1 = c.rsrp1;
+        d.rsrq = c.rsrq;
+        d.sinr = c.sinr1;
+        d.pci = (c.pci != null && c.pci !== "N/A") ? c.pci : "-";
+        d.earfcn = c.earfcn;
+        d.rssi = c.rssi;
     }
+    return d;
 }
 
 function renderWanInfo() {
@@ -1411,27 +1480,22 @@ function setupInfoCheckboxes() {
     var netChk = document.getElementById("chk-network-info");
     var wanChk = document.getElementById("chk-wan-info");
     var devChk = document.getElementById("chk-device-info");
-    var sigChk = document.getElementById("chk-signal-info");
 
     var netSection = document.getElementById("network-info-section");
     var wanSection = document.getElementById("wan-info-section");
     var devSection = document.getElementById("device-info-section");
-    var sigSection = document.getElementById("signal-info-section");
 
     netChk.checked = localStorage.getItem("ScriptCheckBoxNetworkInfo") !== "false";
     wanChk.checked = localStorage.getItem("ScriptCheckBoxWanInfo") === "true";
     devChk.checked = localStorage.getItem("ScriptCheckBoxDeviceInfo") === "true";
-    sigChk.checked = localStorage.getItem("ScriptCheckBoxSignalInfo") !== "false";
 
     netSection.style.display = netChk.checked ? "block" : "none";
     wanSection.style.display = wanChk.checked ? "block" : "none";
     devSection.style.display = devChk.checked ? "block" : "none";
-    sigSection.style.display = sigChk.checked ? "block" : "none";
 
     netChk.addEventListener("change", function() { localStorage.setItem("ScriptCheckBoxNetworkInfo", netChk.checked); netSection.style.display = netChk.checked ? "block" : "none"; });
     wanChk.addEventListener("change", function() { localStorage.setItem("ScriptCheckBoxWanInfo", wanChk.checked); wanSection.style.display = wanChk.checked ? "block" : "none"; });
     devChk.addEventListener("change", function() { localStorage.setItem("ScriptCheckBoxDeviceInfo", devChk.checked); devSection.style.display = devChk.checked ? "block" : "none"; });
-    sigChk.addEventListener("change", function() { localStorage.setItem("ScriptCheckBoxSignalInfo", sigChk.checked); sigSection.style.display = sigChk.checked ? "block" : "none"; });
 }
 
 /* ---- NG-style Panel Injection ---- */
@@ -1452,8 +1516,8 @@ function inject_html() {
         <p class="headline">ZTE MC8020 Script v2025-05-20</p>
       </div>
 
-      <div class="section">
-        <div class="section-title">Network Mode</div>
+      <div class="section section-inline">
+        <span class="section-title-inline">Network Mode</span>
         <div class="button-row">
           <button id="bearer-Only_5G">5G SA</button>
           <button id="bearer-LTE_AND_5G">5G NSA</button>
@@ -1462,58 +1526,58 @@ function inject_html() {
         </div>
       </div>
 
-      <div class="section">
-        <div id="nr-band-lock-header" class="section-title">5G Band Lock</div>
-        <div class="button-row">
-          <button id="band-auto">All</button>
-          <button id="band-manual">Manual</button>
-          <button id="band-n1">N1</button>
-          <button id="band-n3">N3</button>
-          <button id="band-n7">N7</button>
-          <button id="band-n28">N28</button>
-          <button id="band-n28n75">N28+N75</button>
-          <button id="band-n78">N78</button>
-          <button id="band-n78n28n75">N78+N28+N75</button>
-        </div>
-      </div>
-
-      <div class="section">
-        <div id="lte-band-lock-header" class="section-title">4G Band Lock</div>
-        <div class="button-row">
-          <button id="lte-band-auto">All</button>
-          <button id="lte-band-manual">Manual</button>
-          <button id="lte-band-b1">B1</button>
-          <button id="lte-band-b3">B3</button>
-          <button id="lte-band-b7">B7</button>
-          <button id="lte-band-b8">B8</button>
-          <button id="lte-band-b20">B20</button>
-          <button id="lte-band-b28">B28</button>
-          <button id="lte-band-b1b3">B1+B3</button>
-          <button id="lte-band-b1b3b7">B1+B3+B7</button>
-        </div>
-      </div>
-
-      <div class="section celllock-container">
-        <div class="celllock-box">
-          <div class="section-title" id="title-5g-celllock">5G Cell Lock</div>
-          <div class="button-row">
-            <button id="btn-lock-5g-cell">Enable Cell Lock</button>
-            <button id="btn-revert-5g-cell">Revert Cell Lock</button>
+      <div class="section section-bandlock">
+        <div class="section-bandlock-left">
+          <div class="section-bandlock-header">4G Band Lock</div>
+          <div id="lte-band-lock-header" class="button-row button-row-inline">
+            <button id="lte-band-auto">All</button>
+            <button id="lte-band-manual">Manual</button>
+            <button id="lte-band-b1">B1</button>
+            <button id="lte-band-b3">B3</button>
+            <button id="lte-band-b7">B7</button>
+            <button id="lte-band-b8">B8</button>
+            <button id="lte-band-b20">B20</button>
+            <button id="lte-band-b28">B28</button>
+            <button id="lte-band-b1b3">B1+B3</button>
+            <button id="lte-band-b1b3b7">B1+B3+B7</button>
           </div>
         </div>
-        <div class="celllock-box">
-          <div class="section-title" id="title-4g-celllock">4G Cell Lock</div>
+        <div class="section-bandlock-right">
+          <div class="section-bandlock-header">4G Cell Lock</div>
           <div class="button-row">
-            <button id="btn-lock-4g-cell">Enable Cell Lock</button>
-            <button id="btn-revert-4g-cell">Revert Cell Lock</button>
+            <button id="btn-lock-4g-cell">Enable</button>
+            <button id="btn-revert-4g-cell">Revert</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="section section-bandlock">
+        <div class="section-bandlock-left">
+          <div class="section-bandlock-header">5G Band Lock</div>
+          <div id="nr-band-lock-header" class="button-row button-row-inline">
+            <button id="band-auto">All</button>
+            <button id="band-manual">Manual</button>
+            <button id="band-n1">N1</button>
+            <button id="band-n3">N3</button>
+            <button id="band-n7">N7</button>
+            <button id="band-n28">N28</button>
+            <button id="band-n28n75">N28+N75</button>
+            <button id="band-n78">N78</button>
+            <button id="band-n78n28n75">N78+N28+N75</button>
+          </div>
+        </div>
+        <div class="section-bandlock-right">
+          <div class="section-bandlock-header">5G Cell Lock</div>
+          <div class="button-row">
+            <button id="btn-lock-5g-cell">Enable</button>
+            <button id="btn-revert-5g-cell">Revert</button>
           </div>
         </div>
       </div>
 
       <div class="section" id="info-checkboxes">
         <div class="checkbox-group">
-          <label><input type="checkbox" id="chk-network-info"> Show Network Info</label>
-          <label><input type="checkbox" id="chk-signal-info"> Show Signal Info</label>
+          <label><input type="checkbox" id="chk-network-info"> Show Network &amp; Signal Info</label>
           <label><input type="checkbox" id="chk-wan-info"> Show WAN Info</label>
           <label><input type="checkbox" id="chk-device-info"> Show Device Info</label>
         </div>
@@ -1521,12 +1585,7 @@ function inject_html() {
 
       <div class="info-section" id="network-info-section">
         <div class="section-title">Network Info</div>
-        <table id="router-info-table" class="info-table"></table>
-      </div>
-
-      <div class="info-section" id="signal-info-section">
-        <div class="section-title">Signal Info</div>
-        <div id="signal-info-container"></div>
+        <table id="router-info-table" class="info-table-3col"></table>
       </div>
 
       <div class="info-section" id="wan-info-section">
@@ -1569,37 +1628,40 @@ function inject_html() {
     </div>
 
     <style>
-      .info-title { font-weight:bold;font-size:18px;padding:8px 0;margin-bottom:12px;border-bottom:2px solid #ddd;text-align:center; }
-      .info-box { background:#fff;border:1px solid #ccc;border-radius:8px;padding:15px;margin:0 auto;max-width:700px;box-shadow:0 2px 5px rgba(0,0,0,0.1); }
-      .info-section { margin-top:16px;background:#fff;border:1px solid #ddd;border-radius:6px;box-shadow:0 1px 2px rgba(0,0,0,0.05);overflow:hidden; }
-      .section { margin:16px 0; }
-      .section-title { font-weight:bold;margin-bottom:8px;text-align:center;font-size:14px;color:#333; }
-      .button-row { display:flex;flex-wrap:wrap;gap:6px;justify-content:center; }
-      button { background:#f9f9f9;border:1px solid #ccc;border-radius:4px;padding:6px 12px;font-size:13px;cursor:pointer;transition:background 0.2s,color 0.2s; }
+      .info-title { font-weight:bold;font-size:16px;padding:4px 0;margin-bottom:6px;border-bottom:2px solid #ddd;text-align:center; }
+      .info-box { background:#fff;border:1px solid #ccc;border-radius:6px;padding:8px 12px;margin:0 auto;max-width:960px;box-shadow:0 1px 3px rgba(0,0,0,0.1); }
+      .info-section { margin-top:8px;background:#fff;border:1px solid #ddd;border-radius:4px;box-shadow:0 1px 2px rgba(0,0,0,0.05);overflow:hidden; }
+      .section { margin:6px 0; }
+      .section-title { font-weight:bold;margin-bottom:4px;text-align:center;font-size:12px;color:#333; }
+      .section-inline { display:flex;flex-wrap:wrap;align-items:center;gap:6px; }
+      .section-title-inline { font-weight:bold;font-size:12px;color:#333;min-width:80px; }
+      .section-bandlock { display:flex;align-items:stretch;gap:12px; }
+      .section-bandlock-left { flex:2;min-width:0; }
+      .section-bandlock-right { flex:1;min-width:180px;border:1px solid #eee;border-radius:4px;padding:6px 8px;background:#fafafa;display:flex;flex-direction:column;align-items:center;justify-content:center; }
+      .section-bandlock-header { font-weight:bold;font-size:12px;color:#333;margin-bottom:4px; }
+      .button-row { display:flex;flex-wrap:wrap;gap:4px;justify-content:center; }
+      .button-row-inline { display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-start; }
+      button { background:#f9f9f9;border:1px solid #ccc;border-radius:3px;padding:3px 8px;font-size:12px;cursor:pointer;transition:background 0.2s,color 0.2s; }
       button:hover { background:#4CAF50;color:#fff; }
-      .celllock-container { display:flex;justify-content:space-between;gap:20px; }
-      .celllock-box { flex:1;text-align:center;border:1px solid #eee;border-radius:6px;padding:10px;background:#fafafa; }
-      .info-table { width:100%;border-collapse:collapse;margin-top:10px; }
-      .info-table th,.info-table td { padding:6px;border-bottom:1px solid #eee; }
+      .info-table { width:100%;border-collapse:collapse;margin-top:6px; }
+      .info-table th,.info-table td { padding:4px 6px;border-bottom:1px solid #eee;font-size:12px; }
       .info-table th { text-align:left;font-weight:normal;color:#444; }
       .info-table td { text-align:right; }
-      #info-checkboxes { margin-top:12px;display:flex;justify-content:center; }
-      #info-checkboxes .checkbox-group { display:grid;grid-template-columns:repeat(3,minmax(180px,1fr));justify-items:start;align-items:center;gap:8px 32px;width:max-content; }
-      #info-checkboxes label { display:flex;align-items:center;gap:8px;margin:0;white-space:nowrap; }
-      .cellid-sep { opacity:0.5; }
-      .signal-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;margin-top:10px; }
-      .signal-cell { border:1px solid #eee;border-radius:6px;background:#fafafa;padding:8px; }
-      .signal-cell table { width:100%;border-collapse:collapse; }
-      .signal-cell th,.signal-cell td { padding:4px;border-bottom:1px solid #eee; }
-      .signal-cell th { text-align:left;font-weight:normal;color:#444;width:50%; }
-      .signal-cell td { text-align:right; }
-      .signal-cell .cell-title { font-weight:bold;text-align:center;padding:4px 0;margin-bottom:6px;border-bottom:1px solid #ddd; }
-      #more-section .option-section { background:#fafafa;border:1px solid #ddd;border-radius:6px;padding:12px;margin:16px auto;max-width:700px;box-shadow:0 1px 2px rgba(0,0,0,0.05); }
-      #more-section .section-title { font-weight:bold;font-size:14px;margin-bottom:10px;color:#333;text-align:center;border:none; }
-      #more-section .button-row { display:flex;flex-wrap:wrap;gap:8px;justify-content:center; }
-      #more-section button { background:#f9f9f9;border:1px solid #ccc;border-radius:4px;padding:6px 12px;font-size:13px;cursor:pointer;transition:background 0.2s,color 0.2s; }
+      .info-table-3col { width:100%;border-collapse:collapse;margin-top:6px; }
+      .info-table-3col th,.info-table-3col td { padding:3px 6px;border-bottom:1px solid #eee;font-size:12px; }
+      .info-table-3col th { text-align:left;font-weight:normal;color:#444; }
+      .info-table-3col td { text-align:center; }
+      .info-table-3col .param-col { text-align:left;color:#444;width:25%; }
+      .info-table-3col .header-col { font-weight:bold;font-size:12px;color:#333;text-align:center; }
+      #info-checkboxes { margin-top:6px;display:flex;justify-content:center; }
+      #info-checkboxes .checkbox-group { display:grid;grid-template-columns:repeat(3,minmax(150px,1fr));justify-items:start;align-items:center;gap:4px 20px;width:max-content;font-size:12px; }
+      #info-checkboxes label { display:flex;align-items:center;gap:4px;margin:0;white-space:nowrap; }
+      #more-section .option-section { background:#fafafa;border:1px solid #ddd;border-radius:4px;padding:8px;margin:8px auto;max-width:960px;box-shadow:0 1px 2px rgba(0,0,0,0.05); }
+      #more-section .section-title { font-weight:bold;font-size:12px;margin-bottom:6px;color:#333;text-align:center;border:none; }
+      #more-section .button-row { display:flex;flex-wrap:wrap;gap:6px;justify-content:center; }
+      #more-section button { background:#f9f9f9;border:1px solid #ccc;border-radius:3px;padding:3px 8px;font-size:12px;cursor:pointer;transition:background 0.2s,color 0.2s; }
       #more-section button:hover { background:#4CAF50;color:#fff; }
-      #btn-more { display:block;margin:0 auto 12px auto; }
+      #btn-more { display:block;margin:0 auto 6px auto; }
     </style>`;
 
     document.body.prepend(panel);
@@ -1631,6 +1693,7 @@ function inject_html() {
                     alert("Invalid input. Enter band numbers like: 1+3+20");
                 }
             }
+            highlightBandButtons("lte-band-lock-header", btnId);
             var mask = build4gMask(bandsArr);
             if (!isAll) {
                 alert("WARNING: After band lock, you must FULLY POWER CYCLE the router (unplug, wait, plug back in).\n\nA soft reboot is NOT sufficient.\n\nBefore cell locking, make sure band lock is set to AUTO or includes the target cell's band.");
@@ -1666,6 +1729,7 @@ function inject_html() {
                     alert("Invalid input. Enter band numbers like: 1+3+28");
                 }
             }
+            highlightBandButtons("nr-band-lock-header", btnId);
             if (!isAll) {
                 alert("WARNING: After band lock, you must FULLY POWER CYCLE the router (unplug, wait, plug back in).\n\nA soft reboot is NOT sufficient.\n\nBefore cell locking, make sure band lock is set to AUTO or includes the target cell's band.");
             }
